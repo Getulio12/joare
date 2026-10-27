@@ -1,0 +1,51 @@
+name: Retirar site do ar
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/remove-public-site.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: pages
+  cancel-in-progress: false
+jobs:
+  remove:
+    runs-on: ubuntu-latest
+    outputs:
+      removed: ${{ steps.remove.outputs.removed }}
+    steps:
+      - name: Desativar GitHub Pages
+        id: remove
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          if gh api --method DELETE "repos/$REPOSITORY/pages"; then
+            echo 'removed=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'removed=false' >> "$GITHUB_OUTPUT"
+          fi
+  empty:
+    needs: remove
+    if: needs.remove.outputs.removed != 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+    steps:
+      - name: Gerar artefato vazio sem página inicial
+        run: |
+          mkdir withdrawn
+          touch withdrawn/.nojekyll
+          printf 'User-agent: *\nDisallow: /\n' > withdrawn/robots.txt
+          printf '<!doctype html><html lang="pt-BR"><meta charset="utf-8"><meta name="robots" content="noindex,nofollow,noarchive"><title>404</title><p>404 — Indisponível.</p></html>' > withdrawn/404.html
+      - name: Configurar retirada de conteúdo
+        uses: actions/configure-pages@v5
+      - name: Armazenar somente artefato vazio
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: withdrawn
+      - name: Remover todo o conteúdo publicado
+        uses: actions/deploy-pages@v4
