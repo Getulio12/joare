@@ -12,9 +12,10 @@
     "start": "node server/index.mjs",
     "test": "node --test server/*.test.mjs",
     "test:browser": "node tests/browser-smoke.mjs",
-    "build:site": "vite build --mode site --base=/joare/ --outDir dist-site",
+    "build:site": "node scripts/build-public-notice.mjs",
     "news:refresh": "node scripts/fetch-news.mjs",
-    "test:site": "node tests/site-smoke.mjs"
+    "test:site": "node --test tests/public-notice.test.mjs",
+    "build:public-notice": "node scripts/build-public-notice.mjs"
   },
   "dependencies": {
     "@fontsource/dm-sans": "^5.3.0",

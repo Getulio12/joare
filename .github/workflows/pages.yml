@@ -1,12 +1,9 @@
-name: Publicar Joaré Insights
+name: Retirar painel público
 
 on:
   push:
     branches: [main]
   workflow_dispatch:
-  schedule:
-    # 09:00 UTC = 06:00 em America/Fortaleza. O horário do GitHub pode atrasar.
-    - cron: '0 9 * * *'
 
 permissions:
   contents: read
@@ -27,15 +24,8 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '24'
-          cache: npm
-      - name: Instalar dependências do lockfile
-        run: npm ci --no-audit --no-fund
-      - name: Atualizar radar de notícias
-        run: npm run news:refresh
-        env:
-          NODE_USE_ENV_PROXY: '1'
-      - name: Compilar site
-        run: npm run build:site
+      - name: Gerar somente aviso público sem dados
+        run: node scripts/build-public-notice.mjs
       - name: Configurar GitHub Pages
         uses: actions/configure-pages@v5
       - name: Salvar artefato do site
