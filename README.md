@@ -1,10 +1,10 @@
 # Joaré Insights
 
-Painel local preto e dourado para Camila Joare acompanhar o Instagram com dados do Metricool. Inclui histórico diário, métricas por publicação, análises com regras transparentes, ideias de contabilidade, planejamento e radar UOL. Interface em português e banco próprio SQLite.
+Painel preto e dourado para Camila Joare acompanhar o Instagram com dados do Metricool, disponível como site e aplicação local. Inclui histórico diário, métricas por publicação, análises com regras transparentes, ideias de contabilidade, planejamento e radar UOL. Interface em português, banco IndexedDB na versão online e SQLite na versão com servidor.
 
 ## Versão online (GitHub Pages)
 
-O projeto também funciona como site, sem instalar Node ou conectar uma hospedagem paga. O workflow `.github/workflows/pages.yml` compila e publica a interface no GitHub Pages do repositório `Getulio12/joare` quando a publicação estiver habilitada. O endereço previsto é `https://getulio12.github.io/joare/`; confirme a implantação no GitHub antes de tratá-lo como disponível.
+Site publicado e verificado em **https://getulio12.github.io/joare/**. Não é necessário instalar Node ou contratar uma hospedagem para usar essa versão. O workflow `.github/workflows/pages.yml` compila e publica a interface pelo GitHub Actions. Em 27/10/2026, a instalação, atualização das notícias, compilação e implantação passaram no GitHub; a página e o radar UOL foram conferidos no endereço público.
 
 Na versão online, métricas CSV, publicações, configurações e planejamento ficam em um **banco IndexedDB próprio no navegador**. Não são enviados ao repositório, ao GitHub ou a outro visitante. São persistidos entre visitas no mesmo navegador, mas não sincronizam entre aparelhos. Apagar os dados do navegador remove esse banco; exporte os relatórios para mantê-los guardados. A demonstração é separada e identificada.
 
@@ -35,7 +35,7 @@ npm run build
 npm start
 ```
 
-Abra **http://127.0.0.1:3001**. Para encerrar, pressione Ctrl+C no terminal. O projeto roda localmente; não foi instalado no computador do usuário ou publicado na internet por esta sessão.
+Abra **http://127.0.0.1:3001**. Para encerrar, pressione Ctrl+C no terminal. Esses comandos executam a versão local; não instalam o aplicativo automaticamente no computador do usuário. A versão online é acessada pelo endereço GitHub Pages acima.
 
 Para desenvolvimento:
 
