@@ -1,0 +1,55 @@
+name: Publicar Joaré Insights
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    # 09:00 UTC = 06:00 em America/Fortaleza. O horário do GitHub pode atrasar.
+    - cron: '0 9 * * *'
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Obter código
+        uses: actions/checkout@v4
+      - name: Preparar Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Instalar dependências do lockfile
+        run: npm ci --no-audit --no-fund
+      - name: Atualizar radar de notícias
+        run: npm run news:refresh
+        env:
+          NODE_USE_ENV_PROXY: '1'
+      - name: Compilar site
+        run: npm run build:site
+      - name: Configurar GitHub Pages
+        uses: actions/configure-pages@v5
+      - name: Salvar artefato do site
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist-site
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Publicar no GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

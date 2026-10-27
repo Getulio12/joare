@@ -1,0 +1,101 @@
+import { parse } from 'csv-parse/browser/esm/sync';
+import { INITIAL_IDEAS, METRICS, today, shiftDate, validDate, demoMetrics, demoPosts } from './browser-seed.js';
+
+const DB_NAME='joare-insights-camilajoare';
+const INITIAL_SETTINGS={name:'Camila Joare',handle:'camilajoare',goal:'Criar conteúdo útil e aumentar as visualizações',metricoolUserId:'',metricoolBlogId:''};
+const STORES=['settings','metrics','posts','ideas','meta'];
+const NULL_METRICS=Object.fromEntries(METRICS.map(k=>[k,null]));
+const CSV_HEADER='data,visualizacoes,alcance,curtidas,comentarios,salvamentos,compartilhamentos,seguidores';
+const POSTS_HEADER='post_id,data,titulo,formato,url,visualizacoes,alcance,curtidas,comentarios,salvamentos,compartilhamentos';
+let dbPromise;
+function openDB(){
+  if(!dbPromise)dbPromise=new Promise((resolve,reject)=>{
+    if(!globalThis.indexedDB){reject(new Error('Este navegador não permite salvar dados. Use um navegador atualizado fora do modo privado.'));return;}
+    const request=indexedDB.open(DB_NAME,1);
+    request.onupgradeneeded=()=>{for(const name of STORES)request.result.createObjectStore(name);};
+    request.onsuccess=()=>{const db=request.result;db.onversionchange=()=>db.close();resolve(db);};
+    request.onerror=()=>reject(new Error('Não foi possível abrir o banco deste navegador. Confira as permissões de armazenamento.'));
+    request.onblocked=()=>reject(new Error('Feche outras abas do Joaré para atualizar o banco do navegador.'));
+  }).then(async db=>{
+    const initialized=await read(db,'meta','initialized');
+    if(!initialized){
+      await write(db,['settings','ideas','meta'],tx=>{
+        tx.objectStore('settings').put(INITIAL_SETTINGS,'profile');
+        INITIAL_IDEAS.forEach((idea,i)=>tx.objectStore('ideas').put({...idea,id:`idea-${i+1}`,status:'idea',date:null,createdAt:new Date().toISOString()},`idea-${i+1}`));
+        tx.objectStore('meta').put(true,'initialized');
+      });
+    }
+    return db;
+  });
+  return dbPromise;
+}
+function read(db,store,key){return new Promise((resolve,reject)=>{const r=db.transaction(store,'readonly').objectStore(store).get(key);r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(new Error('Não foi possível ler os dados salvos.'));});}
+function all(db,store){return new Promise((resolve,reject)=>{const r=db.transaction(store,'readonly').objectStore(store).getAll();r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(new Error('Não foi possível ler os dados salvos.'));});}
+function write(db,stores,action){return new Promise((resolve,reject)=>{const tx=db.transaction(stores,'readwrite');tx.oncomplete=()=>resolve();tx.onerror=()=>reject(new Error('Não foi possível salvar. Confira o espaço livre e as permissões deste navegador.'));tx.onabort=()=>reject(new Error('A alteração não foi salva no banco do navegador.'));try{action(tx);}catch(e){tx.abort();reject(e);}});}
+function checkRange(query){const days=Number(query.get('days')??30),source=query.get('source')??'live';if(![7,30,90].includes(days))throw new Error('Período inválido. Use 7, 30 ou 90 dias.');if(!['live','demo'].includes(source))throw new Error('Fonte inválida.');return {days,source};}
+const sum=(rows,key)=>{const values=rows.map(r=>r[key]).filter(v=>v!=null);return values.length?values.reduce((a,b)=>a+b,0):null;};
+const ENGAGEMENT=['reach','likes','comments','saves','shares'];
+const complete=(rows,fields,days)=>rows.length===days&&rows.every(r=>fields.every(k=>r[k]!=null));
+function summaryValues(rows,days){const reach=sum(rows,'reach');return {views:sum(rows,'views'),reach,likes:sum(rows,'likes'),engagement:reach>0&&complete(rows,ENGAGEMENT,days)?Math.round(['likes','comments','saves','shares'].reduce((s,k)=>s+sum(rows,k),0)/reach*10000)/100:null,followers:[...rows].reverse().find(r=>r.followers!=null)?.followers??null};}
+async function getDashboard(db,{days,source}){
+  const end=today(),start=shiftDate(end,1-days),previousStart=shiftDate(start,-days);
+  const [profile,storedMetrics,storedPosts,lastEvent]=await Promise.all([read(db,'settings','profile'),all(db,'metrics'),all(db,'posts'),read(db,'meta','lastEvent')]);
+  const rows=(source==='demo'?demoMetrics(end):storedMetrics).sort((a,b)=>a.date.localeCompare(b.date));
+  const current=rows.filter(r=>r.date>=start&&r.date<=end),previous=rows.filter(r=>r.date>=previousStart&&r.date<start);
+  const values=summaryValues(current,days),before=summaryValues(previous,days);
+  const labels={views:'Visualizações',reach:'Alcance acumulado',likes:'Curtidas',engagement:'Engajamento',followers:'Seguidores'};
+  const summary=Object.entries(values).map(([key,value])=>{const fields=key==='engagement'?ENGAGEMENT:[key],a=complete(current,fields,days),b=complete(previous,fields,days);return {key,label:labels[key],value,previous:b?before[key]:null,change:a&&b&&value!=null&&before[key]>0?Math.round((value-before[key])/before[key]*1000)/10:null,unit:key==='engagement'?'%':'number',comparisonComplete:a&&b,coverage:{currentDays:current.filter(r=>fields.every(k=>r[k]!=null)).length,previousDays:previous.filter(r=>fields.every(k=>r[k]!=null)).length,expectedDays:days}};});
+  const daily=Array.from({length:days},(_,i)=>{const date=shiftDate(start,i);return current.find(r=>r.date===date)??{date,...NULL_METRICS};});
+  const posts=(source==='demo'?demoPosts(end):storedPosts).filter(p=>p.publishedAt>=start&&p.publishedAt<=end).sort((a,b)=>(b.views??-1)-(a.views??-1)).map(p=>({...p,engagement:p.reach>0&&ENGAGEMENT.every(k=>p[k]!=null)?Math.round((p.likes+p.comments+p.saves+p.shares)/p.reach*1000)/10:null}));
+  const insights=[];
+  if(!current.length&&!posts.length)insights.push({id:'start',title:'Seu próximo passo: trazer os dados',description:'Importe um CSV do Metricool para analisar o seu perfil. Nenhuma métrica real foi carregada.',priority:'action'});
+  const view=summary.find(s=>s.key==='views');
+  if(view.change!=null)insights.push({id:'views',title:`Visualizações ${view.change>=0?'cresceram':'caíram'} ${Math.abs(view.change).toLocaleString('pt-BR')}%`,description:'Compare seus conteúdos com mais visualizações e teste novos ganchos no mesmo tema. O desempenho anterior não garante crescimento futuro.',priority:view.change>=0?'positive':'attention'});
+  if(values.reach>0&&complete(current,['reach','saves'],days))insights.push({id:'saves',title:`${(sum(current,'saves')/values.reach*100).toLocaleString('pt-BR',{maximumFractionDigits:1})} salvamentos a cada 100 contas alcançadas`,description:'Teste um checklist ou carrossel explicativo. Compare o indicador na próxima semana; alcance acumulado pode contar a mesma pessoa em dias diferentes.',priority:'action'});
+  const best=posts.find(p=>p.views!=null);if(best)insights.push({id:'best',title:`Dê uma continuação a “${best.title.slice(0,65)}”`,description:'Esse conteúdo lidera as views acumuladas entre os posts disponíveis, publicados neste período. Teste uma parte 2 e acompanhe os resultados.',priority:'action'});
+  if(current.length||posts.length)insights.push({id:'experiment',title:'Um teste simples para esta semana',description:'Responda uma dúvida comum de MEI em um Reel. Abra com uma pergunta e compare as visualizações após 24 horas. Não há garantia de viralização.',priority:'action'});
+  if(source==='demo')insights.forEach(i=>i.description+=' Análise de dados demonstrativos.');
+  return {source,demo:source==='demo',profile,period:{days,start,end,previousStart,previousEnd:shiftDate(start,-1)},summary,stats:values,daily,posts,insights:insights.slice(0,4),lastSync:source==='demo'?null:lastEvent?.createdAt??null,hasData:!!current.length,hasPostData:!!posts.length,dataDays:current.length,liveSource:source==='demo'?null:'metricool-csv',storage:'IndexedDB',coverage:source==='demo'?'Dados ilustrativos; não representam o perfil real':'Métricas diárias importadas do CSV, salvas neste navegador',definitions:{reach:'Soma do alcance diário, sem deduplicação entre dias.',engagement:'Interações divididas pelo alcance; só calculado com todos os campos em todos os dias.',change:'Exige dois períodos completos de igual duração.',posts:'Valores acumulados por post no momento da importação, filtrados pela data de publicação.'}};
+}
+const normalize=s=>String(s).normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().trim().replace(/[\s_-]+/g,'');
+const ALIASES={date:['data','date','dia','publishedat','publicationdate'],views:['views','visualizacoes','videoviews','reproducoes'],reach:['reach','alcance'],likes:['likes','curtidas','gostos'],comments:['comments','comentarios'],saves:['saves','salvamentos','saved','guardados'],shares:['shares','compartilhamentos','partilhas'],followers:['followers','seguidores'],id:['postid','id','publicationid','reelid'],title:['titulo','title','conteudo','content','texto','text','caption','legenda'],format:['formato','format','type','tipo'],url:['url','link','permalink','posturl']};
+function records(csv){
+  if(typeof csv!=='string'||!csv.trim())throw new Error('Envie o conteúdo de um arquivo CSV.');if(new TextEncoder().encode(csv).length>2_000_000)throw new Error('O CSV deve ter no máximo 2 MB.');
+  const delimiter=csv.replace(/^\uFEFF/,'').split(/\r?\n/)[0].includes(';')?';':',';
+  let rows;try{rows=parse(csv,{columns:true,bom:true,skip_empty_lines:true,trim:true,delimiter,relax_column_count:false});}catch{throw new Error('CSV inválido. Confira o separador e o número de colunas; use o modelo disponível.');}
+  if(!rows.length||rows.length>5000)throw new Error('O CSV deve conter entre 1 e 5.000 linhas.');return rows;
+}
+function columnsFor(rows,keys){const headers=Object.keys(rows[0]),out={};for(const k of keys){const found=headers.filter(h=>ALIASES[k].includes(normalize(h)));if(found.length>1)throw new Error(`Há mais de uma coluna para ${k}. Use apenas uma.`);out[k]=found[0];}return out;}
+function count(value,line,key){const raw=String(value??'').trim();if(!raw)return null;const normalized=raw.includes(',')?raw.replace(/\./g,'').replace(',','.'):(/^\d{1,3}(?:\.\d{3})+$/.test(raw)?raw.replace(/\./g,''):raw);const n=Number(normalized);if(!Number.isSafeInteger(n)||n<0)throw new Error(`Linha ${line}: ${key} precisa ser um inteiro não negativo.`);return n;}
+function csvDate(raw,line){let date=String(raw??'').trim();const match=date.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);if(match)date=`${match[3]}-${match[2]}-${match[1]}`;if(!validDate(date)||date>today())throw new Error(`Linha ${line}: data inválida ou futura. Use AAAA-MM-DD ou DD/MM/AAAA.`);return date;}
+function parseDaily(csv){const rows=records(csv),cols=columnsFor(rows,['date',...METRICS]);if(!cols.date||!METRICS.some(k=>cols[k]))throw new Error('É necessária a coluna data e pelo menos uma métrica. Baixe o modelo.');const seen=new Set();return rows.map((r,i)=>{const date=csvDate(r[cols.date],i+2);if(seen.has(date))throw new Error(`Data duplicada: ${date}. Use uma linha por dia.`);seen.add(date);const values=Object.fromEntries(METRICS.map(k=>[k,cols[k]?count(r[cols[k]],i+2,k):null]));if(METRICS.every(k=>values[k]===null))throw new Error(`Linha ${i+2}: informe pelo menos uma métrica.`);return {date,...values,source:'metricool-csv'};});}
+function instagramURL(raw,line){const text=String(raw??'').trim();if(!text)return null;let u;try{u=new URL(text);}catch{throw new Error(`Linha ${line}: URL inválida.`);}if(u.protocol!=='https:'||!['instagram.com','www.instagram.com','m.instagram.com'].includes(u.hostname)||u.username||u.password||u.port||!/^\/(p|reel|reels|stories)\/[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)?\/?$/.test(u.pathname))throw new Error(`Linha ${line}: use um link HTTPS de publicação do Instagram.`);u.hostname='www.instagram.com';u.search='';u.hash='';u.pathname=u.pathname.replace(/\/?$/,'/');return u.href;}
+async function parsePosts(csv){
+  const COUNTS=['views','reach','likes','comments','saves','shares'];const rows=records(csv),cols=columnsFor(rows,['id','date','title','format','url',...COUNTS]);if(!cols.date||!cols.title||(!cols.id&&!cols.url)||!COUNTS.some(k=>cols[k]))throw new Error('O CSV de publicações precisa de data, titulo, post_id (ou url) e pelo menos uma métrica.');
+  const formats={reel:'Reel',reels:'Reel',video:'Reel',carrossel:'Carrossel',carousel:'Carrossel',carouselalbum:'Carrossel',stories:'Stories',story:'Stories',post:'Post',image:'Post',imagem:'Post',foto:'Post',photo:'Post'},seen=new Set();
+  return Promise.all(rows.map(async(r,i)=>{const line=i+2,publishedAt=csvDate(r[cols.date],line),title=String(r[cols.title]??'').trim(),rawId=cols.id?String(r[cols.id]??'').trim():'';if(!title||title.length>1000)throw new Error(`Linha ${line}: informe um título com até 1.000 caracteres.`);if(rawId&&!/^[A-Za-z0-9._:-]{1,160}$/.test(rawId))throw new Error(`Linha ${line}: post_id inválido.`);const url=instagramURL(cols.url?r[cols.url]:null,line);if(!rawId&&!url)throw new Error(`Linha ${line}: informe um ID ou link do Instagram.`);
+    const id=rawId?`csv:${rawId}`:`url:${Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(url)))).map(b=>b.toString(16).padStart(2,'0')).join('').slice(0,32)}`;if(seen.has(id))throw new Error(`Linha ${line}: publicação duplicada.`);seen.add(id);const inputFormat=String(cols.format?r[cols.format]:'').trim(),format=inputFormat?formats[normalize(inputFormat)]:'Post';if(!format)throw new Error(`Linha ${line}: formato inválido.`);const values=Object.fromEntries(COUNTS.map(k=>[k,cols[k]?count(r[cols[k]],line,k):null]));if(COUNTS.every(k=>values[k]===null))throw new Error(`Linha ${line}: informe pelo menos uma métrica.`);return {id,title,format,publishedAt,url,...values,source:'metricool-csv'};
+  }));
+}
+function ideaFields(body,partial=false){const out={};for(const k of Object.keys(body)){if(!['title','format','pillar','hook','caption','status','date'].includes(k))throw new Error('Campo de ideia inválido.');const value=body[k]===null?null:String(body[k]).trim();if(value&&value.length>5000)throw new Error('Texto longo demais.');out[k]=value;}if(!partial)for(const k of ['title','format','pillar','hook','caption'])if(!out[k])throw new Error(`Preencha ${k}.`);for(const k of ['title','format','pillar','hook','caption','status'])if(k in out&&!out[k])throw new Error(`O campo ${k} não pode estar vazio.`);if(out.format&&!['Reel','Carrossel','Stories','Post'].includes(out.format))throw new Error('Formato inválido.');if(out.status&&!['idea','planned','published'].includes(out.status))throw new Error('Status inválido.');if(out.date&&!validDate(out.date))throw new Error('Data inválida.');return out;}
+async function loadNews(db){const cached=await read(db,'meta','news');try{const base=import.meta.env?.BASE_URL||'./';const response=await fetch(new URL(`${base}news.json`,location.origin),{cache:'no-store'});if(!response.ok)throw new Error('Fonte indisponível');const payload=await response.json();if(!Array.isArray(payload.articles))throw new Error('Formato inválido');const articles=payload.articles.filter(n=>{try{const u=new URL(n.url);return u.protocol==='https:'&&(u.hostname==='uol.com.br'||u.hostname.endsWith('.uol.com.br'))&&typeof n.title==='string';}catch{return false;}});const value={...payload,articles,stale:!!payload.stale||!payload.fetchedAt||!Number.isFinite(Date.parse(payload.fetchedAt))||Date.now()-Date.parse(payload.fetchedAt)>48*60*60*1000};await write(db,['meta'],tx=>tx.objectStore('meta').put(value,'news'));return value;}catch{return {...cached,articles:cached?.articles??[],fetchedAt:cached?.fetchedAt??null,stale:true,error:'Não foi possível atualizar as notícias do UOL. O radar usa a última atualização diária publicada no site; confira as datas e acesse a fonte diretamente.'};}}
+
+export async function browserApi(path,options={}){
+  const db=await openDB(),url=new URL(path,'https://joare.local'),method=(options.method||'GET').toUpperCase();let body={};if(options.body){try{body=typeof options.body==='string'?JSON.parse(options.body):options.body;}catch{throw new Error('Solicitação inválida.');}}
+  if(url.pathname==='/auth')return {required:false,authenticated:true};
+  if(url.pathname==='/health')return {ok:true,database:true,storage:'IndexedDB'};
+  if(url.pathname==='/dashboard'&&method==='GET')return getDashboard(db,checkRange(url.searchParams));
+  if(url.pathname==='/status'){const [profile,metrics,lastImport]=await Promise.all([read(db,'settings','profile'),all(db,'metrics'),read(db,'meta','lastEvent')]);return {profile,integrations:{metricool:{configured:false,hasToken:false,scope:'Importação CSV no navegador',note:'API opcional disponível somente na versão com servidor.'},uol:{configured:true,requiresNetwork:true}},database:{engine:'IndexedDB',persistent:true,scope:'browser',metrics:metrics.length},lastImport:lastImport??null};}
+  if(url.pathname==='/settings'){
+    const settings=await read(db,'settings','profile');if(method==='GET')return settings;if(method!=='PUT')throw new Error('Operação inválida.');const updates={};for(const k of Object.keys(body)){if(!Object.keys(INITIAL_SETTINGS).includes(k))throw new Error('Campo não aceito. Não salve senhas ou tokens neste formulário.');const value=String(body[k]??'').trim();if(value.length>500)throw new Error('Valor longo demais.');updates[k]=value;}if('name'in updates&&!updates.name)throw new Error('Informe o nome do perfil.');if(updates.handle){updates.handle=updates.handle.replace(/^@/,'');if(!/^[A-Za-z0-9._]{1,30}$/.test(updates.handle))throw new Error('Usuário do Instagram inválido.');}for(const key of ['metricoolUserId','metricoolBlogId'])if(updates[key]&&!/^\d{1,30}$/.test(updates[key]))throw new Error('Os IDs do Metricool devem ser numéricos.');const value={...settings,...updates};await write(db,['settings'],tx=>tx.objectStore('settings').put(value,'profile'));return value;
+  }
+  if(url.pathname==='/ideas'&&method==='GET')return {ideas:(await all(db,'ideas')).sort((a,b)=>b.createdAt.localeCompare(a.createdAt)||a.id.localeCompare(b.id))};
+  if(url.pathname==='/ideas'&&method==='POST'){const values=ideaFields(body),id=crypto.randomUUID(),idea={...values,id,status:values.status??'idea',date:values.date||null,createdAt:new Date().toISOString()};await write(db,['ideas'],tx=>tx.objectStore('ideas').put(idea,id));return idea;}
+  if(url.pathname.startsWith('/ideas/')){const id=decodeURIComponent(url.pathname.slice(7)),idea=await read(db,'ideas',id);if(!idea)throw new Error('Ideia não encontrada.');if(method==='PATCH'){const values=ideaFields(body,true);if(!Object.keys(values).length)throw new Error('Informe os campos para atualizar.');const updated={...idea,...values};await write(db,['ideas'],tx=>tx.objectStore('ideas').put(updated,id));return updated;}if(method==='DELETE'){await write(db,['ideas'],tx=>tx.objectStore('ideas').delete(id));return {};}}
+  if(url.pathname==='/import'&&method==='POST'){const type=body.type??'daily';if(!['daily','posts'].includes(type))throw new Error('Tipo de importação inválido.');const rows=type==='daily'?parseDaily(body.csv):await parsePosts(body.csv),createdAt=new Date().toISOString(),store=type==='daily'?'metrics':'posts';await write(db,[store,'meta'],tx=>{for(const r of rows)tx.objectStore(store).put({...r,...(type==='daily'?{imported_at:createdAt}:{importedAt:createdAt})},type==='daily'?r.date:r.id);tx.objectStore('meta').put({type:type==='daily'?'metricool-csv':'metricool-posts-csv',count:rows.length,createdAt},'lastEvent');});return {type,count:rows.length,importedAt:createdAt,message:type==='daily'?'Métricas salvas no banco deste navegador. Datas iguais substituem o registro anterior.':'Publicações salvas neste navegador, sem somá-las às métricas diárias.'};}
+  if(url.pathname==='/news')return loadNews(db);
+  if(url.pathname==='/sync')throw new Error('Nesta versão online, importe o relatório CSV do Metricool. A conexão por API fica disponível na versão com servidor.');
+  throw new Error('Operação não encontrada.');
+}
+export async function exportDailyCSV({source='live',days=30}={}){const db=await openDB(),range=checkRange(new URLSearchParams({source,days:String(days)})),d=await getDashboard(db,range);return '\uFEFF'+CSV_HEADER+'\n'+d.daily.map(r=>[r.date,...METRICS.map(k=>r[k]??'')].join(',')).join('\n');}
+export function templateCSV(type='daily'){if(!['daily','posts'].includes(type))throw new Error('Tipo de modelo inválido.');return '\uFEFF'+(type==='posts'?POSTS_HEADER:CSV_HEADER)+'\n';}

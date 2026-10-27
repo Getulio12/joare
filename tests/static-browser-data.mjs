@@ -1,0 +1,65 @@
+// Isolated IndexedDB integration checks. Uses a temporary Vite server and fresh browser context.
+// No API keys, published database, user browser profile, or real API writes are used.
+import assert from 'node:assert/strict';
+import { createServer } from 'vite';
+import { chromium } from '@playwright/test';
+const server=await createServer({configFile:false,root:process.cwd(),server:{host:'127.0.0.1',port:0}});
+server.middlewares.use('/adapter-test',(_req,res)=>{res.setHeader('Content-Type','text/html');res.end('<!doctype html><title>Isolated browser database test</title>');});
+await server.listen();
+const url=`http://127.0.0.1:${server.httpServer.address().port}`;
+const browser=await chromium.launch({executablePath:process.env.CHROMIUM_PATH||'/usr/bin/chromium',headless:true,args:['--no-sandbox']});
+const context=await browser.newContext();const page=await context.newPage();
+try{
+  await page.goto(url+'/adapter-test');
+  const result=await page.evaluate(async()=>{
+    const {browserApi:api,exportDailyCSV,templateCSV}=await import('/src/browser-api.js');
+    const day=(offset=0)=>{const d=new Date();const today=new Intl.DateTimeFormat('en-CA',{timeZone:'America/Fortaleza',year:'numeric',month:'2-digit',day:'2-digit'}).format(d);const date=new Date(today+'T12:00:00Z');date.setUTCDate(date.getUTCDate()+offset);return date.toISOString().slice(0,10);};
+    const call=(path,body,method='POST')=>api(path,{method,body:JSON.stringify(body)});
+    const expectError=async(fn)=>{try{await fn();return false;}catch{return true;}};
+    const results=[];
+    let live=await api('/dashboard?source=live&days=7');if(live.hasData||live.stats.views!==null)throw new Error('Live must start empty');
+    const demo=await api('/dashboard?source=demo&days=7');if(!demo.stats.views||demo.daily.length!==7)throw new Error('Demo failed');
+    live=await api('/dashboard?source=live&days=7');if(live.stats.views!==null)throw new Error('Demo contaminated live');
+    const profile=await api('/settings');if(profile.handle!=='camilajoare')throw new Error('Wrong profile');
+    if((await api('/ideas')).ideas.length!==8)throw new Error('Editorial seeds missing');
+    results.push('empty real, isolated demo, profile and editorial seeds');
+    await call('/import',{csv:`data;visualizações;alcance;curtidas;comentários;salvamentos;compartilhamentos;seguidores\n${day(-1)};1234;900;40;7;10;5;1200\n${day(-2)};0;500;;;;;`});
+    live=await api('/dashboard?source=live&days=7');
+    if(live.stats.views!==1234||live.stats.engagement!==null||live.daily.find(r=>r.date===day(-2)).likes!==null||live.summary[0].change!==null)throw new Error('Missing/zero semantics failed');
+    results.push('locale CSV, zero preserved, gaps and incomplete comparisons stay null');
+    if(!await expectError(()=>call('/import',{csv:`date,views\n${day(-3)},99\n2099-01-01,5`})))throw new Error('Future accepted');
+    if(!await expectError(()=>call('/import',{csv:`date,views\n${day(-1)},99\n${day(-1)},5`})))throw new Error('Duplicates accepted');
+    if((await api('/dashboard?source=live&days=7')).stats.views!==1234)throw new Error('Invalid import changed DB');
+    results.push('invalid CSV rejects atomically');
+    await call('/import',{type:'posts',csv:`post_id,date,title,format,views,reach,likes,comments,saves,shares\npost-1,${day(-1)},Primeiro conteúdo,Reels,987,700,30,2,4,5\npost-2,${day(-2)},Sem interação,Carrossel,500,300,,,,`});
+    live=await api('/dashboard?source=live&days=7');if(live.posts[0].views!==987||live.posts[1].engagement!==null||live.stats.views!==1234)throw new Error('Posts mismatch');
+    await call('/import',{type:'posts',csv:`post_id,date,title,views\npost-1,${day(-1)},Primeiro atualizado,999`});
+    if((await api('/dashboard?source=live&days=7')).posts.length!==2)throw new Error('ID upsert duplicated post');
+    if(!await expectError(()=>call('/import',{type:'posts',csv:`url,date,title,views\nhttps://evil.test/x,${day(-1)},Unsafe,5`})))throw new Error('Unsafe link accepted');
+    await call('/import',{type:'posts',csv:`url,date,title,views\nhttps://instagram.com/reel/REAL_ID/?tracking=x,${day(-1)},URL identity,55`});
+    await call('/import',{type:'posts',csv:`url,date,title,views\nhttps://www.instagram.com/reel/REAL_ID/,${day(-1)},URL identity updated,66`});
+    if((await api('/dashboard?source=live&days=7')).posts.length!==3)throw new Error('URL upsert duplicated post');
+    results.push('post snapshots, safe links and stable upserts without daily double count');
+    await call('/settings',{name:'Camila Joare',handle:'@camilajoare'},'PUT');
+    const idea=await call('/ideas',{title:'TESTE persistente',format:'Reel',pillar:'MEI',hook:'Gancho',caption:'Roteiro',status:'idea'});
+    await call('/ideas/'+idea.id,{status:'planned',date:day(1)},'PATCH');
+    await call('/ideas/'+idea.id,{status:'published'},'PATCH');
+    if(!(await api('/ideas')).ideas.some(i=>i.id===idea.id&&i.status==='published'))throw new Error('Planner failed');
+    results.push('profile and planner mutations');
+    const csv='date,views,reach,likes,comments,saves,shares,followers\n'+Array.from({length:14},(_,i)=>`${day(i-13)},${i<7?100:200},100,5,2,1,2,1000`).join('\n');
+    await call('/import',{csv});
+    live=await api('/dashboard?source=live&days=7');if(live.summary.find(s=>s.key==='views').change!==100||live.stats.engagement!==10)throw new Error('Full period formulas incorrect');
+    const exported=await exportDailyCSV({source:'live',days:7});if(!exported.includes('200,100,5,2,1,2,1000')||exported.includes('18420'))throw new Error('CSV export failed');
+    if(!templateCSV('posts').includes('post_id'))throw new Error('Wrong template');
+    results.push('complete aligned periods, engagement and isolated export');
+    return {results,ideaId:idea.id};
+  });
+  assert.equal(result.results.length,6);for(const test of result.results)console.log('PASS:',test);
+  await page.reload();
+  const persisted=await page.evaluate(async(id)=>{const {browserApi:api}=await import('/src/browser-api.js');const ideas=await api('/ideas');const metrics=await api('/dashboard?source=live&days=7');return {idea:ideas.ideas.find(i=>i.id===id),views:metrics.stats.views};},result.ideaId);
+  assert.equal(persisted.idea.status,'published');assert.equal(persisted.views,1400);console.log('PASS: IndexedDB profile, posts and planner survive reload');
+  await page.route('**/news.json',route=>route.fulfill({json:{fetchedAt:new Date().toISOString(),articles:[{id:'test',title:'Fixture do teste, não publicada',url:'https://economia.uol.com.br/fixture.htm',publishedAt:new Date().toISOString()},{id:'bad',title:'Unsafe fixture',url:'javascript:alert(1)'}]}}));
+  const news=await page.evaluate(async()=>{const {browserApi:api}=await import('/src/browser-api.js');return api('/news');});assert.equal(news.articles.length,1);assert.equal(news.stale,false);console.log('PASS: static news preserves source metadata and rejects unsafe links');
+  await page.route('**/news.json',route=>route.abort());
+  const cached=await page.evaluate(async()=>{const {browserApi:api}=await import('/src/browser-api.js');return api('/news?refresh=1');});assert.equal(cached.articles.length,1);assert.equal(cached.stale,true);assert.ok(cached.error);console.log('PASS: failed news refresh preserves cache and reports staleness');
+}finally{await browser.close();await server.close();}

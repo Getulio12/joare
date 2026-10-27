@@ -1,0 +1,30 @@
+# Paid deployment: review Render's current compute and persistent-disk pricing
+# before creating this Blueprint. This file does not provision a service by itself.
+services:
+  - type: web
+    name: joare-insights
+    runtime: node
+    plan: 0.5c-512mb
+    region: oregon
+    numInstances: 1
+    autoDeployTrigger: 'off'
+    buildCommand: npm ci --no-audit --no-fund && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: 24.19.0
+      - key: NODE_ENV
+        value: production
+      - key: HOST
+        value: 0.0.0.0
+      - key: PUBLIC_MODE
+        value: 'true'
+      - key: APP_PASSWORD
+        generateValue: true
+      - key: DATABASE_PATH
+        value: /var/data/joare.sqlite
+    disk:
+      name: joare-data
+      mountPath: /var/data
+      sizeGB: 1

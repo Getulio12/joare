@@ -218,3 +218,14 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Joaré Insights
+node_modules/
+data/
+.env.*
+!.env.example
+playwright-report/
+test-results/
+
+# Public website build
+dist-site/
